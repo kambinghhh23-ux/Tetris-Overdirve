@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Neon Overdrive: Pro Audio Edition</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root { --neon-cyan: #00f2ff; --neon-pink: #ff00ff; --neon-white: #ffffff; }
+        * { touch-action: manipulation; -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Orbitron', sans-serif; color: #fff; }
+        
+        /* UI Layer */
+        #main-hud {
+            position: absolute; inset: 0; border: 8px solid var(--neon-white);
+            box-shadow: inset 0 0 40px rgba(255,255,255,0.2), 0 0 20px rgba(255,255,255,0.3);
+            pointer-events: none; z-index: 50; display: flex; justify-content: space-between; padding: 20px;
+        }
+
+        .side-panel {
+            width: 160px; height: fit-content; background: rgba(0,0,0,0.8);
+            border: 2px solid var(--neon-white); padding: 15px; backdrop-filter: blur(15px);
+            pointer-events: auto;
+        }
+
+        .stat-box { margin-bottom: 20px; }
+        .stat-label { font-size: 9px; color: #888; letter-spacing: 2px; margin-bottom: 5px; }
+        .stat-value { font-size: 22px; font-weight: 900; color: var(--neon-cyan); text-shadow: 0 0 10px var(--neon-cyan); }
+        
+        /* Mobile Input Overlay */
+        #touch-controls {
+            position: absolute; bottom: 30px; left: 0; width: 100%;
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+            padding: 0 20px; z-index: 100; pointer-events: none;
+        }
+        .btn {
+            height: 65px; background: rgba(255,255,255,0.1); border: 2px solid #fff;
+            border-radius: 12px; display: flex; align-items: center; justify-content: center;
+            font-size: 24px; pointer-events: auto; transition: 0.1s;
+        }
+        .btn:active { background: var(--neon-cyan); transform: scale(0.9); }
+        .wide { grid-column: span 3; height: 50px; font-size: 16px; margin-top: 5px; }
+
+        #boot-screen {
+            position: absolute; inset: 0; background: #000; z-index: 1000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        .start-btn {
+            padding: 20px 40px; border: 2px solid var(--neon-cyan); color: var(--neon-cyan);
+            background: none; font-family: 'Orbitron'; cursor: pointer; box-shadow: 0 0 20px var(--neon-cyan);
+        }
+
+        @media (min-width: 1024px) { #touch-controls { display: none; } }
+    </style>
+</head>
+<body>
+
+    <div id="boot-screen">
+        <h1 style="letter-spacing: 10px; margin-bottom: 30px;">NEON_OVERDRIVE</h1>
+        <button class="start-btn" onclick="startSystem()">INITIALIZE_CORE</button>
+    </div>
+
+    <div id="main-hud">
+        <div class="side-panel">
+            <div class="stat-box">
+                <div class="stat-label">SCORE</div>
+                <div id="score" class="stat-value">000000</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">LEVEL</div>
+                <div id="level" class="stat-value" style="color:var(--neon-pink);">01</div>
+            </div>
+        </div>
+
+        <div class="side-panel">
+            <div class="stat-label">NEXT_PROC</div>
+            <div id="next-preview" style="height: 60px; display: flex; align-items: center; justify-content: center;">
+                <canvas id="nextCanvas" width="60" height="60"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div id="touch-controls">
+        <div class="btn" id="m-left">←</div>
+        <div class="btn" id="m-rot">↻</div>
+        <div class="btn" id="m-right">→</div>
+        <div class="btn" id="m-down">↓</div>
+        <div class="btn wide" id="m-drop">HARD_DROP (SPACE)</div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        /**
+         * VERSION: 2.1 - STABLE NEON AUDIO
+         * Fixed: Visual Bugs, Rotation Color Bugs, Ghost Meshes
+         */
+
+        let audioCtx;
+        function playSfx(f, t, d, v, s=false) {
+            if(!audioCtx) return;
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            o.type = t;
+            o.frequency.setValueAtTime(f, audioCtx.currentTime);
+            if(s) o.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + d);
+            g.gain.setValueAtTime(v, audioCtx.currentTime);
+            g.gain.linearRampToValueAtTime(0, audioCtx.currentTime + d);
+            o.connect(g); g.connect(audioCtx.destination);
+            o.start(); o.stop(audioCtx.currentTime + d);
+        }
+
+        const COLS = 10, ROWS = 20;
+        const PALETTE = [0x00f2ff, 0xff00ff, 0x00ff9f, 0xffff00, 0xff4d00, 0x7000ff];
+        const TETROMINOS = {
+            'I': { s: [[1,1,1,1]], c: PALETTE[0] },
+            'O': { s: [[1,1],[1,1]], c: PALETTE[3] },
+            'T': { s: [[0,1,0],[1,1,1]], c: PALETTE[5] },
+            'S': { s: [[0,1,1],[1,1,0]], c: PALETTE[2] },
+            'Z': { s: [[1,1,0],[0,1,1]], c: PALETTE[4] },
+            'J': { s: [[1,0,0],[1,1,1]], c: PALETTE[1] },
+            'L': { s: [[0,0,1],[1,1,1]], c: PALETTE[0] }
+        };
+
+        let scene, camera, renderer, currentPiece, nextType;
+        let board = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+        let score = 0, lastTime = 0, dropCounter = 0, staticBlocks = [], particles = [];
+
+        function startSystem() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            document.getElementById('boot-screen').style.display = 'none';
+            init();
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Lighting
+            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+            const pLight = new THREE.PointLight(0xffffff, 1.2);
+            pLight.position.set(5, 15, 20);
+            scene.add(pLight);
+
+            // Estetika Garis Tepi (Neon Menyilang)
+            const bGeo = new THREE.BoxGeometry(COLS + 0.1, ROWS + 0.1, 1);
+            const bMat = new THREE.MeshBasicMaterial({ color: 0x00f2ff, wireframe: true, transparent: true, opacity: 0.5 });
+            const border = new THREE.Mesh(bGeo, bMat);
+            border.position.set(COLS/2 - 0.5, ROWS/2 - 0.5, -0.1);
+            scene.add(border);
+            window.borderMesh = border;
+
+            camera.position.set(COLS/2 - 0.5, ROWS/2, 22);
+            camera.lookAt(COLS/2 - 0.5, ROWS/2, 0);
+
+            nextType = Object.keys(TETROMINOS)[Math.floor(Math.random()*7)];
+            spawn();
+            setupInput();
+            animate();
+        }
+
+        class Piece {
+            constructor(type) {
+                this.type = type;
+                this.shape = TETROMINOS[type].s;
+                this.color = TETROMINOS[type].c;
+                this.pos = { x: 3, y: 18 };
+                this.group = new THREE.Group();
+                this.ghost = new THREE.Group();
+                this.build();
+            }
+
+            build() {
+                // Bersihkan mesh lama sebelum rebuild (Fix Bug Ganda)
+                scene.remove(this.group);
+                scene.remove(this.ghost);
+                this.group = new THREE.Group();
+                this.ghost = new THREE.Group();
+
+                this.shape.forEach((row, y) => {
+                    row.forEach((v, x) => {
+                        if(v) {
+                            const mat = new THREE.MeshStandardMaterial({ 
+                                color: this.color, emissive: this.color, emissiveIntensity: 1.5 
+                            });
+                            const gMat = mat.clone(); gMat.transparent = true; gMat.opacity = 0.15;
+                            
+                            const box = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.9,0.9), mat);
+                            box.position.set(x, -y, 0);
+                            this.group.add(box);
+
+                            const gBox = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.9,0.9), gMat);
+                            gBox.position.set(x, -y, 0);
+                            this.ghost.add(gBox);
+                        }
+                    });
+                });
+                scene.add(this.group, this.ghost);
+                this.update();
+            }
+
+            update() {
+                this.group.position.set(this.pos.x, this.pos.y, 0);
+                let gy = this.pos.y;
+                while(!collide(this.pos.x, gy - 1, this.shape)) gy--;
+                this.ghost.position.set(this.pos.x, gy, 0);
+            }
+
+            rotate() {
+                const s = this.shape[0].map((_, i) => this.shape.map(row => row[i]).reverse());
+                if(!collide(this.pos.x, this.pos.y, s)) {
+                    this.shape = s;
+                    this.build();
+                    playSfx(400, 'triangle', 0.1, 0.1);
+                }
+            }
+        }
+
+        function collide(px, py, s) {
+            for(let y=0; y<s.length; y++) {
+                for(let x=0; x<s[y].length; x++) {
+                    if(s[y][x]) {
+                        let nx = px+x, ny = py-y;
+                        if(nx<0 || nx>=COLS || ny<0 || (board[ny] && board[ny][nx])) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function spawn() {
+            if(currentPiece) { scene.remove(currentPiece.group); scene.remove(currentPiece.ghost); }
+            currentPiece = new Piece(nextType);
+            nextType = Object.keys(TETROMINOS)[Math.floor(Math.random()*7)];
+            drawNext();
+            if(collide(currentPiece.pos.x, currentPiece.pos.y, currentPiece.shape)) location.reload();
+        }
+
+        function merge() {
+            currentPiece.shape.forEach((row, y) => {
+                row.forEach((v, x) => {
+                    if(v) {
+                        let nx = currentPiece.pos.x+x, ny = currentPiece.pos.y-y;
+                        if(ny>=0) {
+                            board[ny][nx] = currentPiece.color;
+                            const m = new THREE.Mesh(
+                                new THREE.BoxGeometry(0.9,0.9,0.9),
+                                new THREE.MeshStandardMaterial({ color: currentPiece.color, emissive: currentPiece.color, emissiveIntensity: 1 })
+                            );
+                            m.position.set(nx, ny, 0);
+                            scene.add(m);
+                            staticBlocks.push({ x:nx, y:ny, mesh:m });
+                        }
+                    }
+                });
+            });
+            playSfx(100, 'square', 0.2, 0.2, true);
+            clearLines();
+            spawn();
+        }
+
+        function clearLines() {
+            let count = 0;
+            for(let y=0; y<ROWS; y++) {
+                if(board[y].every(v => v !== 0)) {
+                    board.splice(y, 1);
+                    board.push(Array(COLS).fill(0));
+                    staticBlocks = staticBlocks.filter(b => {
+                        if(Math.round(b.y) === y) { scene.remove(b.mesh); return false; }
+                        return true;
+                    });
+                    staticBlocks.forEach(b => { if(b.y > y) { b.y--; b.mesh.position.y--; } });
+                    count++; y--;
+                }
+            }
+            if(count > 0) {
+                score += count * 100;
+                document.getElementById('score').innerText = score.toString().padStart(6, '0');
+                playSfx(600, 'sine', 0.4, 0.3);
+                shake();
+            }
+        }
+
+        function hardDrop() {
+            while(!collide(currentPiece.pos.x, currentPiece.pos.y-1, currentPiece.shape)) currentPiece.pos.y--;
+            merge();
+            playSfx(60, 'sawtooth', 0.3, 0.4, true);
+        }
+
+        function setupInput() {
+            window.addEventListener('keydown', e => {
+                if(e.key === 'ArrowLeft' && !collide(currentPiece.pos.x-1, currentPiece.pos.y, currentPiece.shape)) currentPiece.pos.x--;
+                if(e.key === 'ArrowRight' && !collide(currentPiece.pos.x+1, currentPiece.pos.y, currentPiece.shape)) currentPiece.pos.x++;
+                if(e.key === 'ArrowDown') drop();
+                if(e.key === 'ArrowUp') currentPiece.rotate();
+                if(e.key === ' ') hardDrop();
+                currentPiece.update();
+            });
+
+            const touch = (id, fn) => document.getElementById(id).addEventListener('touchstart', (e) => { e.preventDefault(); fn(); currentPiece.update(); });
+            touch('m-left', () => { if(!collide(currentPiece.pos.x-1, currentPiece.pos.y, currentPiece.shape)) currentPiece.pos.x--; });
+            touch('m-right', () => { if(!collide(currentPiece.pos.x+1, currentPiece.pos.y, currentPiece.shape)) currentPiece.pos.x++; });
+            touch('m-rot', () => currentPiece.rotate());
+            touch('m-down', drop);
+            touch('m-drop', hardDrop);
+        }
+
+        function drop() {
+            if(!collide(currentPiece.pos.x, currentPiece.pos.y-1, currentPiece.shape)) currentPiece.pos.y--;
+            else merge();
+        }
+
+        function drawNext() {
+            const canvas = document.getElementById('nextCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0,0,60,60);
+            ctx.fillStyle = "#00f2ff";
+            TETROMINOS[nextType].s.forEach((row, y) => row.forEach((v, x) => {
+                if(v) ctx.fillRect(x*12+15, y*12+15, 10, 10);
+            }));
+        }
+
+        function shake() {
+            const op = camera.position.clone();
+            let i = 0;
+            const int = setInterval(() => {
+                camera.position.x += (Math.random()-0.5)*0.5;
+                if(++i > 5) { clearInterval(int); camera.position.copy(op); }
+            }, 30);
+        }
+
+        function animate(time = 0) {
+            requestAnimationFrame(animate);
+            const dt = time - lastTime;
+            lastTime = time;
+            dropCounter += dt;
+            
+            if(dropCounter > 1000) { drop(); currentPiece.update(); dropCounter = 0; }
+            
+            // Neon Border Pulse
+            if(window.borderMesh) window.borderMesh.material.color.setHSL((time*0.0001)%1, 1, 0.5);
+            
+            // Camera Sway
+            camera.position.x = (COLS/2 - 0.5) + Math.sin(time*0.001)*0.2;
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
